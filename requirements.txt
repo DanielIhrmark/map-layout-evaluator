@@ -5,4 +5,4 @@ google-auth
 google-api-python-client
 google-genai
 Pillow
-streamlit-drawable-canvas==0.9.3
+streamlit-image-coordinates
