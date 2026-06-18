@@ -57,6 +57,7 @@ def get_google_clients():
     return gspread_client, drive_service
 
 
+@st.cache_resource
 def get_spreadsheet(sheet_url: str):
     gspread_client, _ = get_google_clients()
     return gspread_client.open_by_url(sheet_url)
@@ -196,7 +197,7 @@ def ensure_ratings_headers(sheet_url: str):
         load_ratings_df.clear()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def load_ratings_df(sheet_url: str) -> pd.DataFrame:
     worksheet = get_worksheet(sheet_url, RATINGS_SHEET_NAME)
     records = worksheet.get_all_records()
@@ -345,10 +346,14 @@ def reset_annotation_state_for_new_map(file_id: str):
     if "human_boxes_display" not in st.session_state:
         st.session_state.human_boxes_display = []
 
+    if "last_processed_click" not in st.session_state:
+        st.session_state.last_processed_click = None
+
     if st.session_state.active_file_id != file_id:
         st.session_state.active_file_id = file_id
         st.session_state.current_box_start = None
         st.session_state.human_boxes_display = []
+        st.session_state.last_processed_click = None
 
 
 def make_annotation_preview(
@@ -1013,12 +1018,14 @@ default_gemini_model = st.secrets.get("gemini", {}).get(
     "gemini-3-pro-preview",
 )
 
-try:
-    ensure_ratings_headers(sheet_url)
-except Exception as e:
-    st.error("Could not initialize or verify the ratings sheet header.")
-    st.exception(e)
-    st.stop()
+if "ratings_headers_checked" not in st.session_state:
+    try:
+        ensure_ratings_headers(sheet_url)
+        st.session_state.ratings_headers_checked = True
+    except Exception as e:
+        st.error("Could not initialize or verify the ratings sheet header.")
+        st.exception(e)
+        st.stop()
 
 try:
     files = list_maps_in_folder(folder_id)
@@ -1091,6 +1098,11 @@ filtered_files = filter_maps_by_ratings(
 )
 
 st.sidebar.write(f"Matching maps: **{len(filtered_files)}**")
+
+if st.sidebar.button("Refresh ratings from Google Sheet"):
+    load_ratings_df.clear()
+    st.session_state.ratings_headers_checked = False
+    st.rerun()
 
 if not filtered_files:
     st.warning("No maps match the current filters.")
@@ -1182,33 +1194,45 @@ with tab_annotate:
         key=f"annotation_image_{selected_file['id']}",
     )
 
+    if "last_processed_click" not in st.session_state:
+    st.session_state.last_processed_click = None
+
     if click is not None:
         x_click = int(click["x"])
         y_click = int(click["y"])
-
-        if st.session_state.current_box_start is None:
-            st.session_state.current_box_start = (x_click, y_click)
-            st.rerun()
-        else:
-            x_start, y_start = st.session_state.current_box_start
-
-            x_min = min(x_start, x_click)
-            y_min = min(y_start, y_click)
-            x_max = max(x_start, x_click)
-            y_max = max(y_start, y_click)
-
-            if x_max > x_min and y_max > y_min:
-                st.session_state.human_boxes_display.append(
-                    {
-                        "x_min": x_min,
-                        "y_min": y_min,
-                        "x_max": x_max,
-                        "y_max": y_max,
-                    }
-                )
-
-            st.session_state.current_box_start = None
-            st.rerun()
+    
+        click_signature = (
+            selected_file["id"],
+            x_click,
+            y_click,
+            len(st.session_state.human_boxes_display),
+            st.session_state.current_box_start,
+        )
+    
+        if click_signature != st.session_state.last_processed_click:
+            st.session_state.last_processed_click = click_signature
+    
+            if st.session_state.current_box_start is None:
+                st.session_state.current_box_start = (x_click, y_click)
+            else:
+                x_start, y_start = st.session_state.current_box_start
+    
+                x_min = min(x_start, x_click)
+                y_min = min(y_start, y_click)
+                x_max = max(x_start, x_click)
+                y_max = max(y_start, y_click)
+    
+                if x_max > x_min and y_max > y_min:
+                    st.session_state.human_boxes_display.append(
+                        {
+                            "x_min": x_min,
+                            "y_min": y_min,
+                            "x_max": x_max,
+                            "y_max": y_max,
+                        }
+                    )
+    
+                st.session_state.current_box_start = None
 
     col_reset, col_undo, col_cancel = st.columns(3)
 
