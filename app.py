@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from PIL import Image, ImageDraw, ImageFont
-from streamlit_drawable_canvas import st_canvas
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 
 # ---------------------------------------------------------------------
@@ -162,9 +162,6 @@ def prepare_display_image(
     image_stream = io.BytesIO(image_bytes)
 
     original_image = Image.open(image_stream)
-
-    # Important for Streamlit canvas compatibility.
-    # This avoids problems with palette images, transparency, and CMYK images.
     original_image = original_image.convert("RGB")
 
     original_width, original_height = original_image.size
@@ -335,43 +332,82 @@ def evaluation_result_headers() -> List[str]:
 
 
 # ---------------------------------------------------------------------
-# Annotation handling
+# Human annotation handling
 # ---------------------------------------------------------------------
 
-def canvas_objects_to_boxes(
-    canvas_json: Optional[Dict[str, Any]],
+def reset_annotation_state_for_new_map(file_id: str):
+    if "active_file_id" not in st.session_state:
+        st.session_state.active_file_id = file_id
+
+    if "current_box_start" not in st.session_state:
+        st.session_state.current_box_start = None
+
+    if "human_boxes_display" not in st.session_state:
+        st.session_state.human_boxes_display = []
+
+    if st.session_state.active_file_id != file_id:
+        st.session_state.active_file_id = file_id
+        st.session_state.current_box_start = None
+        st.session_state.human_boxes_display = []
+
+
+def make_annotation_preview(
+    display_image: Image.Image,
+    boxes_display: List[Dict[str, int]],
+    current_box_start: Optional[Tuple[int, int]],
+) -> Image.Image:
+    preview = display_image.copy().convert("RGB")
+    draw = ImageDraw.Draw(preview)
+
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+
+    for i, box in enumerate(boxes_display, start=1):
+        draw.rectangle(
+            [box["x_min"], box["y_min"], box["x_max"], box["y_max"]],
+            outline="red",
+            width=3,
+        )
+        draw.text(
+            (box["x_min"] + 3, box["y_min"] + 3),
+            f"h_{i:03d}",
+            fill="red",
+            font=font,
+        )
+
+    if current_box_start is not None:
+        x_start, y_start = current_box_start
+        draw.ellipse(
+            [x_start - 5, y_start - 5, x_start + 5, y_start + 5],
+            fill="blue",
+        )
+        draw.text(
+            (x_start + 8, y_start + 8),
+            "start",
+            fill="blue",
+            font=font,
+        )
+
+    return preview
+
+
+def display_boxes_to_original_boxes(
+    boxes_display: List[Dict[str, int]],
     scale: float,
 ) -> List[Dict[str, Any]]:
-    if not canvas_json or "objects" not in canvas_json:
-        return []
-
     boxes = []
 
-    for i, obj in enumerate(canvas_json["objects"], start=1):
-        if obj.get("type") != "rect":
-            continue
-
-        left = float(obj.get("left", 0))
-        top = float(obj.get("top", 0))
-        width = float(obj.get("width", 0)) * float(obj.get("scaleX", 1))
-        height = float(obj.get("height", 0)) * float(obj.get("scaleY", 1))
-
-        if width <= 0 or height <= 0:
-            continue
-
-        x_min = left / scale
-        y_min = top / scale
-        x_max = (left + width) / scale
-        y_max = (top + height) / scale
-
+    for i, box in enumerate(boxes_display, start=1):
         boxes.append(
             {
                 "id": f"h_{i:03d}",
                 "class": "text_area",
-                "x_min": round(x_min, 2),
-                "y_min": round(y_min, 2),
-                "x_max": round(x_max, 2),
-                "y_max": round(y_max, 2),
+                "x_min": round(box["x_min"] / scale, 2),
+                "y_min": round(box["y_min"] / scale, 2),
+                "x_max": round(box["x_max"] / scale, 2),
+                "y_max": round(box["y_max"] / scale, 2),
             }
         )
 
@@ -966,7 +1002,7 @@ st.set_page_config(
 st.title("Map Text Area Detection Evaluation")
 st.write(
     "Select maps from the existing Drive folder using the difficulty ratings sheet, "
-    "draw human text-area annotations, run Gemini, and compare the results."
+    "mark human text-area annotations, run Gemini, and compare the results."
 )
 
 sheet_url = st.secrets["app"]["sheet_url"]
@@ -1039,9 +1075,9 @@ only_disagreement = st.sidebar.checkbox(
     value=False,
 )
 
-show_canvas_debug = st.sidebar.checkbox(
-    "Show canvas/image debug info",
-    value=True,
+show_image_debug = st.sidebar.checkbox(
+    "Show image debug info",
+    value=False,
 )
 
 filtered_files = filter_maps_by_ratings(
@@ -1066,6 +1102,8 @@ selected_map_name = st.selectbox(
 )
 
 selected_file = next(file for file in filtered_files if file["name"] == selected_map_name)
+
+reset_annotation_state_for_new_map(selected_file["id"])
 
 try:
     image_bytes = download_drive_image(selected_file["id"])
@@ -1105,21 +1143,19 @@ tab_annotate, tab_gemini, tab_compare, tab_data = st.tabs(
 # ---------------------------------------------------------------------
 
 with tab_annotate:
-    st.subheader("Draw human text-area annotations")
+    st.subheader("Mark human text-area annotations")
 
     if not annotator:
         st.info("Select an annotator in the sidebar before saving annotations.")
 
     st.write(
-        "Draw rectangles around text-bearing regions. "
-        "Use rectangles for now so that the same schema can later be used for YOLO."
+        "Click once to set the first corner of a text area. "
+        "Click a second time to set the opposite corner. "
+        "Repeat this for each text-bearing region."
     )
 
-    # Ensure the background image is in a canvas-friendly format.
-    canvas_background = display_image.convert("RGB")
-
-    if show_canvas_debug:
-        with st.expander("Canvas and image debugging", expanded=True):
+    if show_image_debug:
+        with st.expander("Image debugging", expanded=True):
             st.write("File:", selected_file["name"])
             st.write("File ID:", selected_file["id"])
             st.write("MIME type:", selected_file["mimeType"])
@@ -1128,31 +1164,77 @@ with tab_annotate:
             st.write("Original image size:", original_image.size)
             st.write("Display image mode:", display_image.mode)
             st.write("Display image size:", display_image.size)
-            st.write("Canvas background mode:", canvas_background.mode)
-            st.write("Canvas background size:", canvas_background.size)
             st.write("Scale:", scale)
-
             st.image(
-                canvas_background,
-                caption="Image preview before canvas. If this appears, Drive and PIL loading work.",
+                display_image,
+                caption="Image preview used for annotation",
                 use_container_width=True,
             )
 
-    canvas_result = st_canvas(
-        fill_color="rgba(255, 0, 0, 0.15)",
-        stroke_width=2,
-        stroke_color="#ff0000",
-        background_color="#ffffff",
-        background_image=canvas_background,
-        update_streamlit=True,
-        height=int(canvas_background.height),
-        width=int(canvas_background.width),
-        drawing_mode="rect",
-        key=f"canvas_{selected_file['id']}",
+    annotation_preview = make_annotation_preview(
+        display_image=display_image,
+        boxes_display=st.session_state.human_boxes_display,
+        current_box_start=st.session_state.current_box_start,
     )
 
-    human_boxes = canvas_objects_to_boxes(
-        canvas_json=canvas_result.json_data,
+    click = streamlit_image_coordinates(
+        annotation_preview,
+        key=f"annotation_image_{selected_file['id']}",
+    )
+
+    if click is not None:
+        x_click = int(click["x"])
+        y_click = int(click["y"])
+
+        if st.session_state.current_box_start is None:
+            st.session_state.current_box_start = (x_click, y_click)
+            st.rerun()
+        else:
+            x_start, y_start = st.session_state.current_box_start
+
+            x_min = min(x_start, x_click)
+            y_min = min(y_start, y_click)
+            x_max = max(x_start, x_click)
+            y_max = max(y_start, y_click)
+
+            if x_max > x_min and y_max > y_min:
+                st.session_state.human_boxes_display.append(
+                    {
+                        "x_min": x_min,
+                        "y_min": y_min,
+                        "x_max": x_max,
+                        "y_max": y_max,
+                    }
+                )
+
+            st.session_state.current_box_start = None
+            st.rerun()
+
+    col_reset, col_undo, col_cancel = st.columns(3)
+
+    with col_reset:
+        if st.button("Clear boxes"):
+            st.session_state.human_boxes_display = []
+            st.session_state.current_box_start = None
+            st.rerun()
+
+    with col_undo:
+        if st.button("Undo last box"):
+            if st.session_state.human_boxes_display:
+                st.session_state.human_boxes_display.pop()
+            st.session_state.current_box_start = None
+            st.rerun()
+
+    with col_cancel:
+        if st.button("Cancel current start point"):
+            st.session_state.current_box_start = None
+            st.rerun()
+
+    if st.session_state.current_box_start is not None:
+        st.info("First corner selected. Click the opposite corner to complete the box.")
+
+    human_boxes = display_boxes_to_original_boxes(
+        boxes_display=st.session_state.human_boxes_display,
         scale=scale,
     )
 
