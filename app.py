@@ -1087,14 +1087,19 @@ with tab_annotate:
         "Use rectangles for now so that the same schema can later be used for YOLO."
     )
 
+    # Ensure the background image is in a canvas-friendly format
+    canvas_background = display_image.convert("RGB")
+    st.subheader("Image preview before canvas")
+    st.image(canvas_background, caption="This is the image being passed to the canvas", width="stretch")
     canvas_result = st_canvas(
         fill_color="rgba(255, 0, 0, 0.15)",
         stroke_width=2,
         stroke_color="#ff0000",
-        background_image=display_image,
+        background_color="#ffffff",
+        background_image=canvas_background,
         update_streamlit=True,
-        height=display_image.size[1],
-        width=display_image.size[0],
+        height=int(canvas_background.height),
+        width=int(canvas_background.width),
         drawing_mode="rect",
         key=f"canvas_{selected_file['id']}",
     )
