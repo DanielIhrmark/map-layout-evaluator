@@ -1188,6 +1188,14 @@ with tab_annotate:
                 use_container_width=True,
             )
 
+    if st.session_state.current_box_start is None:
+        st.caption("No active start point. Click the first corner of a text area.")
+    else:
+        st.caption(
+            f"Start point selected at {st.session_state.current_box_start}. "
+            "Click the opposite corner to complete the box."
+        )
+    
     annotation_preview = make_annotation_preview(
         display_image=display_image,
         boxes_display=st.session_state.human_boxes_display,
@@ -1202,28 +1210,27 @@ with tab_annotate:
     if click is not None:
         x_click = int(click["x"])
         y_click = int(click["y"])
-
+    
         click_signature = (
             selected_file["id"],
             x_click,
             y_click,
-            len(st.session_state.human_boxes_display),
-            st.session_state.current_box_start,
         )
-
+    
         if click_signature != st.session_state.last_processed_click:
             st.session_state.last_processed_click = click_signature
-
+    
             if st.session_state.current_box_start is None:
                 st.session_state.current_box_start = (x_click, y_click)
+                st.rerun()
             else:
                 x_start, y_start = st.session_state.current_box_start
-
+    
                 x_min = min(x_start, x_click)
                 y_min = min(y_start, y_click)
                 x_max = max(x_start, x_click)
                 y_max = max(y_start, y_click)
-
+    
                 if x_max > x_min and y_max > y_min:
                     st.session_state.human_boxes_display.append(
                         {
@@ -1233,8 +1240,9 @@ with tab_annotate:
                             "y_max": y_max,
                         }
                     )
-
+    
                 st.session_state.current_box_start = None
+                st.rerun()
 
     col_reset, col_undo, col_cancel = st.columns(3)
 
