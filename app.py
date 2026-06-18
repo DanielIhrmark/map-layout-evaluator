@@ -63,6 +63,7 @@ def get_spreadsheet(sheet_url: str):
     return gspread_client.open_by_url(sheet_url)
 
 
+@st.cache_resource
 def get_worksheet(sheet_url: str, worksheet_name: str):
     spreadsheet = get_spreadsheet(sheet_url)
     return spreadsheet.worksheet(worksheet_name)
@@ -99,7 +100,7 @@ def get_or_create_worksheet(
 # Drive handling
 # ---------------------------------------------------------------------
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def list_maps_in_folder(folder_id: str) -> List[Dict[str, str]]:
     _, drive_service = get_google_clients()
 
@@ -137,7 +138,7 @@ def list_maps_in_folder(folder_id: str) -> List[Dict[str, str]]:
     return files
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def download_drive_image(file_id: str) -> bytes:
     _, drive_service = get_google_clients()
 
@@ -449,7 +450,7 @@ def save_human_annotation(
     load_human_annotations_df.clear()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def load_human_annotations_df(sheet_url: str) -> pd.DataFrame:
     try:
         worksheet = get_worksheet(sheet_url, HUMAN_ANNOTATIONS_SHEET_NAME)
@@ -716,7 +717,7 @@ def save_gemini_prediction(
     load_gemini_predictions_df.clear()
 
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def load_gemini_predictions_df(sheet_url: str) -> pd.DataFrame:
     try:
         worksheet = get_worksheet(sheet_url, GEMINI_PREDICTIONS_SHEET_NAME)
@@ -1013,19 +1014,28 @@ st.write(
 sheet_url = st.secrets["app"]["sheet_url"]
 folder_id = st.secrets["app"]["drive_folder_id"]
 
+with st.sidebar.expander("Maintenance"):
+    if st.button("Verify ratings sheet headers"):
+        try:
+            ensure_ratings_headers(sheet_url)
+            st.success("Ratings sheet headers verified.")
+        except Exception as e:
+            st.error("Could not verify ratings sheet headers.")
+            st.exception(e)
+
+    if st.button("Refresh ratings cache"):
+        load_ratings_df.clear()
+        st.success("Ratings cache cleared. Reload the app to fetch fresh ratings.")
+
+    if st.button("Refresh Drive file cache"):
+        list_maps_in_folder.clear()
+        download_drive_image.clear()
+        st.success("Drive cache cleared. Reload the app to fetch fresh files.")
+
 default_gemini_model = st.secrets.get("gemini", {}).get(
     "model",
     "gemini-3-pro-preview",
 )
-
-if "ratings_headers_checked" not in st.session_state:
-    try:
-        ensure_ratings_headers(sheet_url)
-        st.session_state.ratings_headers_checked = True
-    except Exception as e:
-        st.error("Could not initialize or verify the ratings sheet header.")
-        st.exception(e)
-        st.stop()
 
 try:
     files = list_maps_in_folder(folder_id)
@@ -1098,11 +1108,6 @@ filtered_files = filter_maps_by_ratings(
 )
 
 st.sidebar.write(f"Matching maps: **{len(filtered_files)}**")
-
-if st.sidebar.button("Refresh ratings from Google Sheet"):
-    load_ratings_df.clear()
-    st.session_state.ratings_headers_checked = False
-    st.rerun()
 
 if not filtered_files:
     st.warning("No maps match the current filters.")
@@ -1194,13 +1199,10 @@ with tab_annotate:
         key=f"annotation_image_{selected_file['id']}",
     )
 
-    if "last_processed_click" not in st.session_state:
-        st.session_state.last_processed_click = None
-
     if click is not None:
         x_click = int(click["x"])
         y_click = int(click["y"])
-    
+
         click_signature = (
             selected_file["id"],
             x_click,
@@ -1208,20 +1210,20 @@ with tab_annotate:
             len(st.session_state.human_boxes_display),
             st.session_state.current_box_start,
         )
-    
+
         if click_signature != st.session_state.last_processed_click:
             st.session_state.last_processed_click = click_signature
-    
+
             if st.session_state.current_box_start is None:
                 st.session_state.current_box_start = (x_click, y_click)
             else:
                 x_start, y_start = st.session_state.current_box_start
-    
+
                 x_min = min(x_start, x_click)
                 y_min = min(y_start, y_click)
                 x_max = max(x_start, x_click)
                 y_max = max(y_start, y_click)
-    
+
                 if x_max > x_min and y_max > y_min:
                     st.session_state.human_boxes_display.append(
                         {
@@ -1231,7 +1233,7 @@ with tab_annotate:
                             "y_max": y_max,
                         }
                     )
-    
+
                 st.session_state.current_box_start = None
 
     col_reset, col_undo, col_cancel = st.columns(3)
@@ -1240,6 +1242,7 @@ with tab_annotate:
         if st.button("Clear boxes"):
             st.session_state.human_boxes_display = []
             st.session_state.current_box_start = None
+            st.session_state.last_processed_click = None
             st.rerun()
 
     with col_undo:
@@ -1247,11 +1250,13 @@ with tab_annotate:
             if st.session_state.human_boxes_display:
                 st.session_state.human_boxes_display.pop()
             st.session_state.current_box_start = None
+            st.session_state.last_processed_click = None
             st.rerun()
 
     with col_cancel:
         if st.button("Cancel current start point"):
             st.session_state.current_box_start = None
+            st.session_state.last_processed_click = None
             st.rerun()
 
     if st.session_state.current_box_start is not None:
