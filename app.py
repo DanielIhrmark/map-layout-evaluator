@@ -1195,7 +1195,7 @@ with tab_annotate:
     )
 
     if "last_processed_click" not in st.session_state:
-    st.session_state.last_processed_click = None
+        st.session_state.last_processed_click = None
 
     if click is not None:
         x_click = int(click["x"])
