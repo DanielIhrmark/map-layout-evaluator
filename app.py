@@ -1,6 +1,5 @@
 import io
 import json
-import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -160,7 +159,14 @@ def prepare_display_image(
     image_bytes: bytes,
     display_width: int = DISPLAY_WIDTH,
 ) -> Tuple[Image.Image, Image.Image, float]:
-    original_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image_stream = io.BytesIO(image_bytes)
+
+    original_image = Image.open(image_stream)
+
+    # Important for Streamlit canvas compatibility.
+    # This avoids problems with palette images, transparency, and CMYK images.
+    original_image = original_image.convert("RGB")
+
     original_width, original_height = original_image.size
 
     if original_width <= display_width:
@@ -169,7 +175,12 @@ def prepare_display_image(
     else:
         scale = display_width / original_width
         display_height = int(original_height * scale)
-        display_image = original_image.resize((display_width, display_height))
+        display_image = original_image.resize(
+            (display_width, display_height),
+            Image.Resampling.LANCZOS,
+        )
+
+    display_image = display_image.convert("RGB")
 
     return original_image, display_image, scale
 
@@ -274,7 +285,7 @@ def filter_maps_by_ratings(
 
 
 # ---------------------------------------------------------------------
-# Annotation handling
+# Sheet schemas
 # ---------------------------------------------------------------------
 
 def human_annotation_headers() -> List[str]:
@@ -322,6 +333,10 @@ def evaluation_result_headers() -> List[str]:
         "matches_json",
     ]
 
+
+# ---------------------------------------------------------------------
+# Annotation handling
+# ---------------------------------------------------------------------
 
 def canvas_objects_to_boxes(
     canvas_json: Optional[Dict[str, Any]],
@@ -867,7 +882,7 @@ def draw_boxes_on_image(
     gemini_boxes: Optional[List[Dict[str, Any]]] = None,
     scale: float = 1.0,
 ) -> Image.Image:
-    rendered = image.copy()
+    rendered = image.copy().convert("RGB")
     draw = ImageDraw.Draw(rendered)
 
     human_boxes = human_boxes or []
@@ -982,7 +997,10 @@ if not files:
     st.stop()
 
 
+# ---------------------------------------------------------------------
 # Sidebar selection
+# ---------------------------------------------------------------------
+
 st.sidebar.header("Selection")
 
 annotator = st.sidebar.selectbox(
@@ -1021,6 +1039,11 @@ only_disagreement = st.sidebar.checkbox(
     value=False,
 )
 
+show_canvas_debug = st.sidebar.checkbox(
+    "Show canvas/image debug info",
+    value=True,
+)
+
 filtered_files = filter_maps_by_ratings(
     files=files,
     ratings_df=ratings_df,
@@ -1044,8 +1067,13 @@ selected_map_name = st.selectbox(
 
 selected_file = next(file for file in filtered_files if file["name"] == selected_map_name)
 
-image_bytes = download_drive_image(selected_file["id"])
-original_image, display_image, scale = prepare_display_image(image_bytes)
+try:
+    image_bytes = download_drive_image(selected_file["id"])
+    original_image, display_image, scale = prepare_display_image(image_bytes)
+except Exception as e:
+    st.error("Could not download or prepare the selected image.")
+    st.exception(e)
+    st.stop()
 
 original_width, original_height = original_image.size
 
@@ -1087,10 +1115,29 @@ with tab_annotate:
         "Use rectangles for now so that the same schema can later be used for YOLO."
     )
 
-    # Ensure the background image is in a canvas-friendly format
+    # Ensure the background image is in a canvas-friendly format.
     canvas_background = display_image.convert("RGB")
-    st.subheader("Image preview before canvas")
-    st.image(canvas_background, caption="This is the image being passed to the canvas", width="stretch")
+
+    if show_canvas_debug:
+        with st.expander("Canvas and image debugging", expanded=True):
+            st.write("File:", selected_file["name"])
+            st.write("File ID:", selected_file["id"])
+            st.write("MIME type:", selected_file["mimeType"])
+            st.write("Downloaded image bytes:", len(image_bytes))
+            st.write("Original image mode:", original_image.mode)
+            st.write("Original image size:", original_image.size)
+            st.write("Display image mode:", display_image.mode)
+            st.write("Display image size:", display_image.size)
+            st.write("Canvas background mode:", canvas_background.mode)
+            st.write("Canvas background size:", canvas_background.size)
+            st.write("Scale:", scale)
+
+            st.image(
+                canvas_background,
+                caption="Image preview before canvas. If this appears, Drive and PIL loading work.",
+                use_container_width=True,
+            )
+
     canvas_result = st_canvas(
         fill_color="rgba(255, 0, 0, 0.15)",
         stroke_width=2,
@@ -1326,7 +1373,10 @@ with tab_data:
     )
 
     if data_choice == "Ratings":
-        st.dataframe(add_rating_summary_columns(ratings_df), use_container_width=True)
+        st.dataframe(
+            add_rating_summary_columns(ratings_df),
+            use_container_width=True,
+        )
 
     elif data_choice == "Human annotations":
         human_df = load_human_annotations_df(sheet_url)
