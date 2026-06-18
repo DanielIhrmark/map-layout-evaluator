@@ -1,8 +1,8 @@
-streamlit
+streamlit==1.40.0
 pandas
 gspread
 google-auth
 google-api-python-client
 google-genai
 Pillow
-streamlit-drawable-canvas
+streamlit-drawable-canvas==0.9.3
