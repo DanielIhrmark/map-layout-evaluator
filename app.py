@@ -23,6 +23,7 @@ REVIEWERS = ["Henrik", "Daniel", "Thomas", "Ahmad", "Jonas"]
 
 RATINGS_SHEET_NAME = "Sheet1"
 HUMAN_ANNOTATIONS_SHEET_NAME = "HumanAnnotations"
+HUMAN_ANNOTATIONS_FLAT_SHEET_NAME = "HumanAnnotationsFlat"
 GEMINI_PREDICTIONS_SHEET_NAME = "GeminiPredictions"
 EVALUATION_RESULTS_SHEET_NAME = "EvaluationResults"
 
@@ -299,6 +300,19 @@ def human_annotation_headers() -> List[str]:
     ]
 
 
+def human_annotation_flat_headers() -> List[str]:
+    return [
+        "image_name",
+        "image_width",
+        "image_height",
+        "label",
+        "x",
+        "y",
+        "width",
+        "height",
+    ]
+
+
 def gemini_prediction_headers() -> List[str]:
     return [
         "timestamp",
@@ -420,6 +434,40 @@ def display_boxes_to_original_boxes(
     return boxes
 
 
+def boxes_to_flat_annotation_rows(
+    map_name: str,
+    image_width: int,
+    image_height: int,
+    boxes: List[Dict[str, Any]],
+    label: str = "text_area",
+) -> List[List[Any]]:
+    rows = []
+
+    for box in boxes:
+        x_min = int(round(float(box["x_min"])))
+        y_min = int(round(float(box["y_min"])))
+        x_max = int(round(float(box["x_max"])))
+        y_max = int(round(float(box["y_max"])))
+
+        box_width = max(0, x_max - x_min)
+        box_height = max(0, y_max - y_min)
+
+        rows.append(
+            [
+                map_name,
+                int(image_width),
+                int(image_height),
+                label,
+                x_min,
+                y_min,
+                box_width,
+                box_height,
+            ]
+        )
+
+    return rows
+
+
 def save_human_annotation(
     sheet_url: str,
     map_name: str,
@@ -450,6 +498,32 @@ def save_human_annotation(
     load_human_annotations_df.clear()
 
 
+def save_human_annotation_flat(
+    sheet_url: str,
+    map_name: str,
+    image_width: int,
+    image_height: int,
+    boxes: List[Dict[str, Any]],
+    label: str = "text_area",
+):
+    worksheet = get_or_create_worksheet(
+        sheet_url,
+        HUMAN_ANNOTATIONS_FLAT_SHEET_NAME,
+        human_annotation_flat_headers(),
+    )
+
+    rows = boxes_to_flat_annotation_rows(
+        map_name=map_name,
+        image_width=image_width,
+        image_height=image_height,
+        boxes=boxes,
+        label=label,
+    )
+
+    if rows:
+        worksheet.append_rows(rows)
+
+
 @st.cache_data(ttl=300)
 def load_human_annotations_df(sheet_url: str) -> pd.DataFrame:
     try:
@@ -469,6 +543,27 @@ def load_human_annotations_df(sheet_url: str) -> pd.DataFrame:
             df[col] = ""
 
     return df[human_annotation_headers()].fillna("")
+
+
+@st.cache_data(ttl=300)
+def load_human_annotations_flat_df(sheet_url: str) -> pd.DataFrame:
+    try:
+        worksheet = get_worksheet(sheet_url, HUMAN_ANNOTATIONS_FLAT_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        return pd.DataFrame(columns=human_annotation_flat_headers())
+
+    records = worksheet.get_all_records()
+
+    if not records:
+        return pd.DataFrame(columns=human_annotation_flat_headers())
+
+    df = pd.DataFrame(records)
+
+    for col in human_annotation_flat_headers():
+        if col not in df.columns:
+            df[col] = ""
+
+    return df[human_annotation_flat_headers()].fillna("")
 
 
 def get_latest_human_annotation(
@@ -1195,7 +1290,7 @@ with tab_annotate:
             f"Start point selected at {st.session_state.current_box_start}. "
             "Click the opposite corner to complete the box."
         )
-    
+
     annotation_preview = make_annotation_preview(
         display_image=display_image,
         boxes_display=st.session_state.human_boxes_display,
@@ -1210,27 +1305,27 @@ with tab_annotate:
     if click is not None:
         x_click = int(click["x"])
         y_click = int(click["y"])
-    
+
         click_signature = (
             selected_file["id"],
             x_click,
             y_click,
         )
-    
+
         if click_signature != st.session_state.last_processed_click:
             st.session_state.last_processed_click = click_signature
-    
+
             if st.session_state.current_box_start is None:
                 st.session_state.current_box_start = (x_click, y_click)
                 st.rerun()
             else:
                 x_start, y_start = st.session_state.current_box_start
-    
+
                 x_min = min(x_start, x_click)
                 y_min = min(y_start, y_click)
                 x_max = max(x_start, x_click)
                 y_max = max(y_start, y_click)
-    
+
                 if x_max > x_min and y_max > y_min:
                     st.session_state.human_boxes_display.append(
                         {
@@ -1240,7 +1335,7 @@ with tab_annotate:
                             "y_max": y_max,
                         }
                     )
-    
+
                 st.session_state.current_box_start = None
                 st.rerun()
 
@@ -1267,9 +1362,6 @@ with tab_annotate:
             st.session_state.last_processed_click = None
             st.rerun()
 
-    if st.session_state.current_box_start is not None:
-        st.info("First corner selected. Click the opposite corner to complete the box.")
-
     human_boxes = display_boxes_to_original_boxes(
         boxes_display=st.session_state.human_boxes_display,
         scale=scale,
@@ -1277,6 +1369,22 @@ with tab_annotate:
 
     st.write(f"Current boxes: **{len(human_boxes)}**")
     st.json(human_boxes)
+
+    flat_preview_rows = boxes_to_flat_annotation_rows(
+        map_name=selected_file["name"],
+        image_width=original_width,
+        image_height=original_height,
+        boxes=human_boxes,
+        label="text_area",
+    )
+
+    flat_preview_df = pd.DataFrame(
+        flat_preview_rows,
+        columns=human_annotation_flat_headers(),
+    )
+
+    st.subheader("Flat annotation preview")
+    st.dataframe(flat_preview_df, use_container_width=True)
 
     if st.button("Save human annotations", type="primary"):
         if not annotator:
@@ -1293,9 +1401,21 @@ with tab_annotate:
                 image_height=original_height,
                 boxes=human_boxes,
             )
+
+            save_human_annotation_flat(
+                sheet_url=sheet_url,
+                map_name=selected_file["name"],
+                image_width=original_width,
+                image_height=original_height,
+                boxes=human_boxes,
+                label="text_area",
+            )
+
+            load_human_annotations_flat_df.clear()
+
             st.success(
                 f"Saved {len(human_boxes)} human annotations for "
-                f"{selected_file['name']}."
+                f"{selected_file['name']} in both JSON and flat CSV-style formats."
             )
 
 
@@ -1486,6 +1606,7 @@ with tab_data:
         [
             "Ratings",
             "Human annotations",
+            "Human annotations flat",
             "Gemini predictions",
         ],
         horizontal=True,
@@ -1500,6 +1621,18 @@ with tab_data:
     elif data_choice == "Human annotations":
         human_df = load_human_annotations_df(sheet_url)
         st.dataframe(human_df, use_container_width=True)
+
+    elif data_choice == "Human annotations flat":
+        flat_df = load_human_annotations_flat_df(sheet_url)
+        st.dataframe(flat_df, use_container_width=True)
+
+        csv_bytes = flat_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download flat annotations as CSV",
+            data=csv_bytes,
+            file_name="map_annotations.csv",
+            mime="text/csv",
+        )
 
     elif data_choice == "Gemini predictions":
         gemini_df = load_gemini_predictions_df(sheet_url)
